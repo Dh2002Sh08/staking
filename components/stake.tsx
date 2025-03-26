@@ -1,5 +1,5 @@
 "use client";
-import { FC, useState, useEffect } from 'react';
+import { FC, useState, useEffect, useCallback, useMemo } from 'react';
 import { useWallet } from '@solana/wallet-adapter-react';
 import { WalletMultiButton } from '@solana/wallet-adapter-react-ui';
 import {
@@ -16,8 +16,8 @@ import {
     getAccount,
     getMint
 } from '@solana/spl-token';
-import { AnchorProvider, BN, Program } from '@project-serum/anchor';
-import { PROGRAM_ID, deriveStakingAccountPDA, getProgram } from '@/lib/program';
+import { AnchorProvider, BN } from '@project-serum/anchor';
+import { deriveStakingAccountPDA, getProgram } from '@/lib/program';
 
 export const StakeComponent: FC = () => {
     const { publicKey, sendTransaction, signTransaction } = useWallet();
@@ -29,18 +29,33 @@ export const StakeComponent: FC = () => {
     const [tokenDecimals, setTokenDecimals] = useState<number>(9);
     const [tokenSymbol, setTokenSymbol] = useState<string>('');
 
-    const connection = new Connection('https://api.devnet.solana.com');
+    const connection = useMemo(() => new Connection('https://api.devnet.solana.com'), []);
+
+    const fetchStakedAmount = useCallback(async () => {
+        try {
+            if (!publicKey || !tokenMint) return;
+
+            const stakingAccountPDA = deriveStakingAccountPDA(publicKey);
+            const accountInfo = await connection.getAccountInfo(stakingAccountPDA);
+
+            if (accountInfo) {
+                const amount = accountInfo.data.readBigUInt64LE(8);
+                setStakedAmount(Number(amount));
+            }
+        } catch (error) {
+            console.error('Error fetching staked amount:', error);
+        }
+    }, [publicKey, tokenMint, connection]);
 
     useEffect(() => {
         if (publicKey) {
             fetchStakedAmount();
         }
-    }, [publicKey]);
+    }, [publicKey, fetchStakedAmount]);
 
     const fetchTokenInfo = async (mintAddress: string) => {
         try {
-            const mintPubkey = new PublicKey(mintAddress);
-            const mintInfo = await getMint(connection, mintPubkey);
+            const mintInfo = await getMint(connection, new PublicKey(mintAddress));
             setTokenDecimals(mintInfo.decimals);
             setTokenSymbol(mintAddress.slice(0, 4) + '...' + mintAddress.slice(-4));
             setError('');
@@ -57,23 +72,6 @@ export const StakeComponent: FC = () => {
         setTokenMint(value);
         if (value) {
             await fetchTokenInfo(value);
-        }
-    };
-
-    const fetchStakedAmount = async () => {
-        try {
-            if (!publicKey || !tokenMint) return;
-
-            const mintPubkey = new PublicKey(tokenMint);
-            const stakingAccountPDA = deriveStakingAccountPDA(publicKey);
-            const accountInfo = await connection.getAccountInfo(stakingAccountPDA);
-
-            if (accountInfo) {
-                const amount = accountInfo.data.readBigUInt64LE(8);
-                setStakedAmount(Number(amount));
-            }
-        } catch (error) {
-            console.error('Error fetching staked amount:', error);
         }
     };
 
@@ -148,8 +146,8 @@ export const StakeComponent: FC = () => {
             // Check if token account exists
             try {
                 await getAccount(connection, userTokenAccount);
-            } catch (e: any) {
-                if (e.name === 'TokenAccountNotFoundError') {
+            } catch (error: unknown) {
+                if (error && typeof error === 'object' && 'name' in error && error.name === 'TokenAccountNotFoundError') {
                     const transaction = new Transaction().add(
                         createAssociatedTokenAccountInstruction(
                             publicKey,
@@ -163,7 +161,7 @@ export const StakeComponent: FC = () => {
                     const signature = await sendTransaction(transaction, connection);
                     await connection.confirmTransaction(signature);
                 } else {
-                    throw e;
+                    throw error;
                 }
             }
 
@@ -192,11 +190,12 @@ export const StakeComponent: FC = () => {
 
             await fetchStakedAmount();
             setAmount('');
-        } catch (error: any) {
+        } catch (error: unknown) {
             console.error('Detailed staking error:', error);
-            if (error.logs) {
+            if (error && typeof error === 'object' && 'logs' in error) {
+                const errorWithLogs = error as { logs: string[] };
                 // Check for token mint error
-                const tokenMintError = error.logs.find((log: string) => 
+                const tokenMintError = errorWithLogs.logs.find((log: string) => 
                     log.includes('ProgramError caused by account: token_mint') ||
                     log.includes('Error Code: InvalidAccountData')
                 );
@@ -204,9 +203,9 @@ export const StakeComponent: FC = () => {
                 if (tokenMintError) {
                     setError('Invalid token mint address. Please enter a valid SPL token mint address.');
                 } else {
-                    setError(`Failed to stake tokens: ${error.logs.join('\n')}`);
+                    setError(`Failed to stake tokens: ${errorWithLogs.logs.join('\n')}`);
                 }
-            } else if (error.message) {
+            } else if (error instanceof Error) {
                 setError(`Failed to stake tokens: ${error.message}`);
             } else {
                 setError('Failed to stake tokens. Please check your token balance and try again.');
@@ -276,9 +275,13 @@ export const StakeComponent: FC = () => {
             await connection.confirmTransaction(signature);
 
             await fetchStakedAmount();
-        } catch (error) {
+        } catch (error: unknown) {
             console.error('Error unstaking:', error);
-            setError('Failed to unstake tokens. Please try again.');
+            if (error instanceof Error) {
+                setError(`Failed to unstake tokens: ${error.message}`);
+            } else {
+                setError('Failed to unstake tokens. Please try again.');
+            }
         } finally {
             setLoading(false);
         }

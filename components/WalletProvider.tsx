@@ -23,7 +23,7 @@ export const SolanaWalletProvider: FC<Props> = ({ children }) => {
             new PhantomWalletAdapter(),
             new SolflareWalletAdapter()
         ],
-        [network]
+        []
     );
 
     return (
