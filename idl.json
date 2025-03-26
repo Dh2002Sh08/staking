@@ -1,13 +1,13 @@
 {
-    "programId": "8at9aBRvovFguL6ri67YWfCEJFD5gzxwo9FMGuupkSSM",
+    "program_id": "9KqUvjg4NNZpJvL3TxqDjcxTAib37RJNRBRjKLveTPoe",
     "version": "0.1.0",
-    "name": "staking",
+    "name": "staking_app",
     "instructions": [
         {
             "name": "initialize",
             "accounts": [
                 {
-                    "name": "stakingMetadata",
+                    "name": "stakingAccount",
                     "isMut": true,
                     "isSigner": false
                 },
@@ -15,6 +15,16 @@
                     "name": "user",
                     "isMut": true,
                     "isSigner": true
+                },
+                {
+                    "name": "tokenMint",
+                    "isMut": false,
+                    "isSigner": false
+                },
+                {
+                    "name": "tokenProgram",
+                    "isMut": false,
+                    "isSigner": false
                 },
                 {
                     "name": "systemProgram",
@@ -28,27 +38,12 @@
             "name": "stake",
             "accounts": [
                 {
-                    "name": "stakingMetadata",
-                    "isMut": true,
-                    "isSigner": false
-                },
-                {
-                    "name": "stakingVault",
-                    "isMut": true,
-                    "isSigner": false
-                },
-                {
-                    "name": "userStake",
+                    "name": "stakingAccount",
                     "isMut": true,
                     "isSigner": false
                 },
                 {
                     "name": "userTokenAccount",
-                    "isMut": true,
-                    "isSigner": false
-                },
-                {
-                    "name": "mint",
                     "isMut": true,
                     "isSigner": false
                 },
@@ -59,16 +54,6 @@
                 },
                 {
                     "name": "tokenProgram",
-                    "isMut": false,
-                    "isSigner": false
-                },
-                {
-                    "name": "systemProgram",
-                    "isMut": false,
-                    "isSigner": false
-                },
-                {
-                    "name": "associatedTokenProgram",
                     "isMut": false,
                     "isSigner": false
                 }
@@ -84,27 +69,12 @@
             "name": "unstake",
             "accounts": [
                 {
-                    "name": "stakingMetadata",
-                    "isMut": true,
-                    "isSigner": false
-                },
-                {
-                    "name": "stakingVault",
-                    "isMut": true,
-                    "isSigner": false
-                },
-                {
-                    "name": "userStake",
+                    "name": "stakingAccount",
                     "isMut": true,
                     "isSigner": false
                 },
                 {
                     "name": "userTokenAccount",
-                    "isMut": true,
-                    "isSigner": false
-                },
-                {
-                    "name": "mint",
                     "isMut": true,
                     "isSigner": false
                 },
@@ -115,16 +85,6 @@
                 },
                 {
                     "name": "tokenProgram",
-                    "isMut": false,
-                    "isSigner": false
-                },
-                {
-                    "name": "systemProgram",
-                    "isMut": false,
-                    "isSigner": false
-                },
-                {
-                    "name": "associatedTokenProgram",
                     "isMut": false,
                     "isSigner": false
                 }
@@ -139,33 +99,17 @@
     ],
     "accounts": [
         {
-            "name": "StakingMetadata",
+            "name": "StakingAccount",
             "type": {
                 "kind": "struct",
                 "fields": [
-                    {
-                        "name": "owner",
-                        "type": "publicKey"
-                    },
                     {
                         "name": "totalStaked",
                         "type": "u64"
-                    }
-                ]
-            }
-        },
-        {
-            "name": "UserStake",
-            "type": {
-                "kind": "struct",
-                "fields": [
-                    {
-                        "name": "owner",
-                        "type": "publicKey"
                     },
                     {
-                        "name": "amount",
-                        "type": "u64"
+                        "name": "tokenMint",
+                        "type": "publicKey"
                     }
                 ]
             }
@@ -174,18 +118,13 @@
     "errors": [
         {
             "code": 6000,
-            "name": "InvalidAmount",
-            "msg": "Invalid staking amount. Must be greater than zero."
+            "name": "InsufficientFunds",
+            "msg": "Insufficient funds to unstake."
         },
         {
             "code": 6001,
-            "name": "NothingToUnstake",
-            "msg": "You have nothing to unstake."
-        },
-        {
-            "code": 6002,
-            "name": "InvalidVaultAuthority",
-            "msg": "Invalid vault authority."
+            "name": "IncorrectTokenMint",
+            "msg": "The token mint does not match."
         }
     ]
 }

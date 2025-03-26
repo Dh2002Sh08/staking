@@ -2,26 +2,25 @@
 import { FC, useState, useEffect } from 'react';
 import { useWallet } from '@solana/wallet-adapter-react';
 import { WalletMultiButton } from '@solana/wallet-adapter-react-ui';
-import { 
-    Connection, 
-    PublicKey, 
-    Transaction, 
-    SystemProgram, 
-    LAMPORTS_PER_SOL,
-    SYSVAR_RENT_PUBKEY
+import {
+    Connection,
+    PublicKey,
+    Transaction,
+    SystemProgram,
 } from '@solana/web3.js';
-import { 
-    TOKEN_PROGRAM_ID, 
+import {
+    TOKEN_PROGRAM_ID,
     ASSOCIATED_TOKEN_PROGRAM_ID,
     getAssociatedTokenAddress,
     createAssociatedTokenAccountInstruction,
     getAccount,
     getMint
 } from '@solana/spl-token';
-import { PROGRAM_ID_PUBKEY, deriveStakingMetadataPDA, deriveStakingVaultPDA, deriveUserStakePDA } from '@/lib/program';
+import { AnchorProvider, BN, Program } from '@project-serum/anchor';
+import { PROGRAM_ID, deriveStakingAccountPDA, getProgram } from '@/lib/program';
 
 export const StakeComponent: FC = () => {
-    const { publicKey, sendTransaction } = useWallet();
+    const { publicKey, sendTransaction, signTransaction } = useWallet();
     const [amount, setAmount] = useState<string>('');
     const [tokenMint, setTokenMint] = useState<string>('');
     const [stakedAmount, setStakedAmount] = useState<number>(0);
@@ -63,11 +62,14 @@ export const StakeComponent: FC = () => {
 
     const fetchStakedAmount = async () => {
         try {
+            if (!publicKey || !tokenMint) return;
+
             const mintPubkey = new PublicKey(tokenMint);
-            const userStakePDA = deriveUserStakePDA(publicKey!, mintPubkey);
-            const accountInfo = await connection.getAccountInfo(userStakePDA);
+            const stakingAccountPDA = deriveStakingAccountPDA(publicKey);
+            const accountInfo = await connection.getAccountInfo(stakingAccountPDA);
+
             if (accountInfo) {
-                const amount = accountInfo.data.readBigUInt64LE(32);
+                const amount = accountInfo.data.readBigUInt64LE(8);
                 setStakedAmount(Number(amount));
             }
         } catch (error) {
@@ -76,47 +78,79 @@ export const StakeComponent: FC = () => {
     };
 
     const handleStake = async () => {
-        if (!publicKey || !amount || !tokenMint) return;
+        if (!publicKey || !amount || !tokenMint || !signTransaction) return;
 
         try {
             setLoading(true);
             setError('');
 
             const mintPubkey = new PublicKey(tokenMint);
-            const stakingAmount = BigInt(Number(amount) * Math.pow(10, tokenDecimals));
-            const stakingMetadataPDA = deriveStakingMetadataPDA(mintPubkey);
-            const stakingVaultPDA = deriveStakingVaultPDA(mintPubkey);
-            const userStakePDA = deriveUserStakePDA(publicKey, mintPubkey);
-            
-            console.log('Staking Parameters:', {
-                stakingAmount: stakingAmount.toString(),
-                stakingMetadataPDA: stakingMetadataPDA.toString(),
-                stakingVaultPDA: stakingVaultPDA.toString(),
-                userStakePDA: userStakePDA.toString(),
-                tokenMint: mintPubkey.toString()
-            });
-            
+            const stakingAmount = new BN(Number(amount) * Math.pow(10, tokenDecimals));
+
             // Get or create user's token account
             const userTokenAccount = await getAssociatedTokenAddress(
                 mintPubkey,
                 publicKey
             );
 
-            const transaction = new Transaction();
+            // Get PDA
+            const stakingAccountPDA = deriveStakingAccountPDA(publicKey);
 
-            // Check if token account exists and get its balance
-            try {
-                const tokenAccount = await getAccount(connection, userTokenAccount);
-                console.log('Token Account Balance:', tokenAccount.amount.toString());
-                
-                // Check if user has enough tokens
-                if (tokenAccount.amount < stakingAmount) {
-                    throw new Error(`Insufficient token balance. Required: ${stakingAmount.toString()}, Available: ${tokenAccount.amount.toString()}`);
+            // Create provider and program
+            const provider = new AnchorProvider(
+                connection,
+                {
+                    publicKey,
+                    signTransaction,
+                    signAllTransactions: async (txs) => {
+                        const signedTxs = await Promise.all(
+                            txs.map(tx => signTransaction(tx))
+                        );
+                        return signedTxs;
+                    }
+                },
+                { commitment: 'confirmed' }
+            );
+            const program = getProgram(provider);
+
+            // Check if staking account exists
+            const stakingAccount = await connection.getAccountInfo(stakingAccountPDA);
+            if (!stakingAccount) {
+                // Verify token mint account exists and is valid
+                const mintInfo = await getMint(connection, mintPubkey);
+                if (!mintInfo) {
+                    throw new Error('Invalid token mint account');
                 }
+
+                // Initialize staking account
+                const initTx = await program.methods
+                    .initialize()
+                    .accounts({
+                        stakingAccount: stakingAccountPDA,
+                        user: publicKey,
+                        tokenMint: mintPubkey,
+                        tokenProgram: TOKEN_PROGRAM_ID,
+                        systemProgram: SystemProgram.programId,
+                    })
+                    .transaction();
+
+                // Get the latest blockhash
+                const { blockhash } = await connection.getLatestBlockhash();
+                initTx.recentBlockhash = blockhash;
+                initTx.feePayer = publicKey;
+
+                // Sign and send the initialization transaction
+                const signedInitTx = await signTransaction(initTx);
+                const initSignature = await connection.sendRawTransaction(signedInitTx.serialize());
+                await connection.confirmTransaction(initSignature);
+            }
+
+            // Check if token account exists
+            try {
+                await getAccount(connection, userTokenAccount);
             } catch (e: any) {
                 if (e.name === 'TokenAccountNotFoundError') {
-                    console.log('Creating new token account...');
-                    transaction.add(
+                    const transaction = new Transaction().add(
                         createAssociatedTokenAccountInstruction(
                             publicKey,
                             userTokenAccount,
@@ -126,49 +160,54 @@ export const StakeComponent: FC = () => {
                             ASSOCIATED_TOKEN_PROGRAM_ID
                         )
                     );
+                    const signature = await sendTransaction(transaction, connection);
+                    await connection.confirmTransaction(signature);
                 } else {
                     throw e;
                 }
             }
 
-            // Add stake instruction
-            const stakeIx = {
-                programId: PROGRAM_ID_PUBKEY,
-                keys: [
-                    { pubkey: stakingMetadataPDA, isSigner: false, isWritable: true },
-                    { pubkey: stakingVaultPDA, isSigner: false, isWritable: true },
-                    { pubkey: userStakePDA, isSigner: false, isWritable: true },
-                    { pubkey: userTokenAccount, isSigner: false, isWritable: true },
-                    { pubkey: mintPubkey, isSigner: false, isWritable: true },
-                    { pubkey: publicKey, isSigner: true, isWritable: true },
-                    { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
-                    { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
-                    { pubkey: ASSOCIATED_TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
-                ],
-                data: Buffer.from([1, ...new Uint8Array(new BigUint64Array([stakingAmount]).buffer)])
-            };
+            // Create the stake transaction
+            const tx = await program.methods
+                .stake(stakingAmount)
+                .accounts({
+                    stakingAccount: stakingAccountPDA,
+                    userTokenAccount: userTokenAccount,
+                    user: publicKey,
+                    tokenProgram: TOKEN_PROGRAM_ID,
+                })
+                .transaction();
 
-            transaction.add(stakeIx);
-            console.log('Transaction created, sending...');
+            // Get the latest blockhash
+            const { blockhash } = await connection.getLatestBlockhash();
+            tx.recentBlockhash = blockhash;
+            tx.feePayer = publicKey;
 
-            const signature = await sendTransaction(transaction, connection);
-            console.log('Transaction sent:', signature);
-            
-            const confirmation = await connection.confirmTransaction(signature);
-            console.log('Transaction confirmed:', confirmation);
-            
-            if (confirmation.value.err) {
-                throw new Error(`Transaction failed: ${JSON.stringify(confirmation.value.err)}`);
-            }
+            // Sign the transaction
+            const signedTx = await signTransaction(tx);
+
+            // Send the transaction
+            const signature = await connection.sendRawTransaction(signedTx.serialize());
+            await connection.confirmTransaction(signature);
 
             await fetchStakedAmount();
             setAmount('');
         } catch (error: any) {
             console.error('Detailed staking error:', error);
-            if (error.message) {
+            if (error.logs) {
+                // Check for token mint error
+                const tokenMintError = error.logs.find((log: string) => 
+                    log.includes('ProgramError caused by account: token_mint') ||
+                    log.includes('Error Code: InvalidAccountData')
+                );
+                
+                if (tokenMintError) {
+                    setError('Invalid token mint address. Please enter a valid SPL token mint address.');
+                } else {
+                    setError(`Failed to stake tokens: ${error.logs.join('\n')}`);
+                }
+            } else if (error.message) {
                 setError(`Failed to stake tokens: ${error.message}`);
-            } else if (error.logs) {
-                setError(`Failed to stake tokens: ${error.logs.join('\n')}`);
             } else {
                 setError('Failed to stake tokens. Please check your token balance and try again.');
             }
@@ -178,47 +217,64 @@ export const StakeComponent: FC = () => {
     };
 
     const handleUnstake = async () => {
-        if (!publicKey || stakedAmount <= 0 || !tokenMint) return;
+        if (!publicKey || stakedAmount <= 0 || !tokenMint || !signTransaction) return;
 
         try {
             setLoading(true);
             setError('');
 
             const mintPubkey = new PublicKey(tokenMint);
-            const unstakingAmount = BigInt(stakedAmount * Math.pow(10, tokenDecimals));
-            const stakingMetadataPDA = deriveStakingMetadataPDA(mintPubkey);
-            const stakingVaultPDA = deriveStakingVaultPDA(mintPubkey);
-            const userStakePDA = deriveUserStakePDA(publicKey, mintPubkey);
-            
+            const unstakingAmount = new BN(stakedAmount * Math.pow(10, tokenDecimals));
+
+            // Get user's token account
             const userTokenAccount = await getAssociatedTokenAddress(
                 mintPubkey,
                 publicKey
             );
 
-            const transaction = new Transaction();
+            // Get PDA
+            const stakingAccountPDA = deriveStakingAccountPDA(publicKey);
 
-            // Add unstake instruction
-            const unstakeIx = {
-                programId: PROGRAM_ID_PUBKEY,
-                keys: [
-                    { pubkey: stakingMetadataPDA, isSigner: false, isWritable: true },
-                    { pubkey: stakingVaultPDA, isSigner: false, isWritable: true },
-                    { pubkey: userStakePDA, isSigner: false, isWritable: true },
-                    { pubkey: userTokenAccount, isSigner: false, isWritable: true },
-                    { pubkey: mintPubkey, isSigner: false, isWritable: true },
-                    { pubkey: publicKey, isSigner: true, isWritable: true },
-                    { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
-                    { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
-                    { pubkey: ASSOCIATED_TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
-                ],
-                data: Buffer.from([2, ...new Uint8Array(new BigUint64Array([unstakingAmount]).buffer)])
-            };
+            // Create provider and program
+            const provider = new AnchorProvider(
+                connection,
+                {
+                    publicKey,
+                    signTransaction,
+                    signAllTransactions: async (txs) => {
+                        const signedTxs = await Promise.all(
+                            txs.map(tx => signTransaction(tx))
+                        );
+                        return signedTxs;
+                    }
+                },
+                { commitment: 'confirmed' }
+            );
+            const program = getProgram(provider);
 
-            transaction.add(unstakeIx);
+            // Create the unstake transaction
+            const tx = await program.methods
+                .unstake(unstakingAmount)
+                .accounts({
+                    stakingAccount: stakingAccountPDA,
+                    userTokenAccount: userTokenAccount,
+                    user: publicKey,
+                    tokenProgram: TOKEN_PROGRAM_ID,
+                })
+                .transaction();
 
-            const signature = await sendTransaction(transaction, connection);
+            // Get the latest blockhash
+            const { blockhash } = await connection.getLatestBlockhash();
+            tx.recentBlockhash = blockhash;
+            tx.feePayer = publicKey;
+
+            // Sign the transaction
+            const signedTx = await signTransaction(tx);
+
+            // Send the transaction
+            const signature = await connection.sendRawTransaction(signedTx.serialize());
             await connection.confirmTransaction(signature);
-            
+
             await fetchStakedAmount();
         } catch (error) {
             console.error('Error unstaking:', error);
@@ -233,13 +289,13 @@ export const StakeComponent: FC = () => {
             <div className="flex justify-center mb-8">
                 <WalletMultiButton className="!bg-purple-600 hover:!bg-purple-700 !text-white font-bold py-2 px-4 rounded" />
             </div>
-            
+
             {publicKey && (
                 <div className="space-y-4">
                     <div className="text-sm text-gray-600 dark:text-gray-300">
                         Connected Wallet: {publicKey.toString().slice(0, 4)}...{publicKey.toString().slice(-4)}
                     </div>
-                    
+
                     <div className="space-y-2">
                         <label className="block text-sm font-medium text-gray-700">
                             Token Mint Address
@@ -292,7 +348,7 @@ export const StakeComponent: FC = () => {
                         >
                             {loading ? 'Processing...' : 'Stake'}
                         </button>
-                        
+
                         <button
                             onClick={handleUnstake}
                             disabled={loading || stakedAmount <= 0 || !tokenMint}
